@@ -10,7 +10,6 @@ package mysql
 
 import (
 	"bytes"
-	"crypto/tls"
 	"database/sql/driver"
 	"encoding/binary"
 	"encoding/json"
@@ -222,13 +221,6 @@ func (mc *mysqlConn) readHandshakePacket() (data []byte, plugin string, err erro
 	if mc.flags&clientProtocol41 == 0 {
 		return nil, "", ErrOldProtocol
 	}
-	if mc.flags&clientSSL == 0 && mc.cfg.TLS != nil {
-		if mc.cfg.AllowFallbackToPlaintext {
-			mc.cfg.TLS = nil
-		} else {
-			return nil, "", ErrNoTLS
-		}
-	}
 	pos += 2
 
 	if len(data) > pos {
@@ -291,11 +283,6 @@ func (mc *mysqlConn) writeHandshakeResponsePacket(authResp []byte, plugin string
 		clientFlags |= clientFoundRows
 	}
 
-	// To enable TLS / SSL
-	if mc.cfg.TLS != nil {
-		clientFlags |= clientSSL
-	}
-
 	if mc.cfg.MultiStatements {
 		clientFlags |= clientMultiStatements
 	}
@@ -352,24 +339,6 @@ func (mc *mysqlConn) writeHandshakeResponsePacket(authResp []byte, plugin string
 	pos := 13
 	for ; pos < 13+23; pos++ {
 		data[pos] = 0
-	}
-
-	// SSL Connection Request Packet
-	// http://dev.mysql.com/doc/internals/en/connection-phase-packets.html#packet-Protocol::SSLRequest
-	if mc.cfg.TLS != nil {
-		// Send TLS / SSL request packet
-		if err := mc.writePacket(data[:(4+4+1+23)+4]); err != nil {
-			return err
-		}
-
-		// Switch to TLS
-		tlsConn := tls.Client(mc.netConn, mc.cfg.TLS)
-		if err := tlsConn.Handshake(); err != nil {
-			return err
-		}
-		mc.rawConn = mc.netConn
-		mc.netConn = tlsConn
-		mc.buf.nc = tlsConn
 	}
 
 	// User [null terminated string]

@@ -11,6 +11,7 @@ package mysql
 import (
 	"context"
 	"database/sql/driver"
+	"errors"
 	"net"
 )
 
@@ -21,47 +22,32 @@ type connector struct {
 // Connect implements driver.Connector interface.
 // Connect returns a connection to the database.
 func (c *connector) Connect(ctx context.Context) (driver.Conn, error) {
-	var err error
+	dialFn := c.cfg.DialFunc
+	if dialFn == nil {
+		return nil, errors.New("config dialfunc is not set")
+	}
 
+	nc, err := dialFn(ctx, c.cfg.Addr)
+	if err != nil {
+		return nil, err
+	}
+
+	return BeginConn(ctx, c.cfg, nc)
+}
+
+// BeginConn starts a new mysql connection from a net.Conn.
+// Performs the initial handshakes.
+// (originally implemented in connector.Connect)
+func BeginConn(ctx context.Context, cfg *Config, nc net.Conn) (driver.Conn, error) {
 	// New mysqlConn
 	mc := &mysqlConn{
 		maxAllowedPacket: maxPacketSize,
 		maxWriteSize:     maxPacketSize - 1,
 		closech:          make(chan struct{}),
-		cfg:              c.cfg,
+		cfg:              cfg,
+		netConn:          nc,
 	}
 	mc.parseTime = mc.cfg.ParseTime
-
-	// Connect to Server
-	dialsLock.RLock()
-	dial, ok := dials[mc.cfg.Net]
-	dialsLock.RUnlock()
-	if ok {
-		dctx := ctx
-		if mc.cfg.Timeout > 0 {
-			var cancel context.CancelFunc
-			dctx, cancel = context.WithTimeout(ctx, c.cfg.Timeout)
-			defer cancel()
-		}
-		mc.netConn, err = dial(dctx, mc.cfg.Addr)
-	} else {
-		nd := net.Dialer{Timeout: mc.cfg.Timeout}
-		mc.netConn, err = nd.DialContext(ctx, mc.cfg.Net, mc.cfg.Addr)
-	}
-
-	if err != nil {
-		return nil, err
-	}
-
-	// Enable TCP Keepalives on TCP connections
-	if tc, ok := mc.netConn.(*net.TCPConn); ok {
-		if err := tc.SetKeepAlive(true); err != nil {
-			// Don't send COM_QUIT before handshake.
-			mc.netConn.Close()
-			mc.netConn = nil
-			return nil, err
-		}
-	}
 
 	// Call startWatcher for context support (From Go 1.8)
 	mc.startWatcher()
