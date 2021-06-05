@@ -9,7 +9,6 @@
 package mysql
 
 import (
-	"crypto/tls"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/binary"
@@ -17,75 +16,9 @@ import (
 	"fmt"
 	"io"
 	"strconv"
-	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 )
-
-// Registry for custom tls.Configs
-var (
-	tlsConfigLock     sync.RWMutex
-	tlsConfigRegistry map[string]*tls.Config
-)
-
-// RegisterTLSConfig registers a custom tls.Config to be used with sql.Open.
-// Use the key as a value in the DSN where tls=value.
-//
-// Note: The provided tls.Config is exclusively owned by the driver after
-// registering it.
-//
-//	rootCertPool := x509.NewCertPool()
-//	pem, err := ioutil.ReadFile("/path/ca-cert.pem")
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	if ok := rootCertPool.AppendCertsFromPEM(pem); !ok {
-//	    log.Fatal("Failed to append PEM.")
-//	}
-//	clientCert := make([]tls.Certificate, 0, 1)
-//	certs, err := tls.LoadX509KeyPair("/path/client-cert.pem", "/path/client-key.pem")
-//	if err != nil {
-//	    log.Fatal(err)
-//	}
-//	clientCert = append(clientCert, certs)
-//	mysql.RegisterTLSConfig("custom", &tls.Config{
-//	    RootCAs: rootCertPool,
-//	    Certificates: clientCert,
-//	})
-//	db, err := sql.Open("mysql", "user@tcp(localhost:3306)/test?tls=custom")
-func RegisterTLSConfig(key string, config *tls.Config) error {
-	if _, isBool := readBool(key); isBool || strings.ToLower(key) == "skip-verify" || strings.ToLower(key) == "preferred" {
-		return fmt.Errorf("key '%s' is reserved", key)
-	}
-
-	tlsConfigLock.Lock()
-	if tlsConfigRegistry == nil {
-		tlsConfigRegistry = make(map[string]*tls.Config)
-	}
-
-	tlsConfigRegistry[key] = config
-	tlsConfigLock.Unlock()
-	return nil
-}
-
-// DeregisterTLSConfig removes the tls.Config associated with key.
-func DeregisterTLSConfig(key string) {
-	tlsConfigLock.Lock()
-	if tlsConfigRegistry != nil {
-		delete(tlsConfigRegistry, key)
-	}
-	tlsConfigLock.Unlock()
-}
-
-func getTLSConfigClone(key string) (config *tls.Config) {
-	tlsConfigLock.RLock()
-	if v, ok := tlsConfigRegistry[key]; ok {
-		config = v.Clone()
-	}
-	tlsConfigLock.RUnlock()
-	return
-}
 
 // Returns the bool value of the input.
 // The 2nd return value indicates if the input was a valid bool value

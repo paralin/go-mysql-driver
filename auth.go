@@ -273,22 +273,12 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 		if len(mc.cfg.Passwd) == 0 {
 			return []byte{0}, nil
 		}
-		// unlike caching_sha2_password, sha256_password does not accept
-		// cleartext password on unix transport.
-		if mc.cfg.TLS != nil {
-			// write cleartext auth packet
-			return append([]byte(mc.cfg.Passwd), 0), nil
+		if !mc.cfg.AllowCleartextPasswords {
+			return nil, ErrCleartextPassword
 		}
-
-		pubKey := mc.cfg.pubKey
-		if pubKey == nil {
-			// request public key from server
-			return []byte{1}, nil
-		}
-
-		// encrypted password
-		enc, err := encryptPassword(mc.cfg.Passwd, authData, pubKey)
-		return enc, err
+		// http://dev.mysql.com/doc/refman/5.7/en/cleartext-authentication-plugin.html
+		// http://dev.mysql.com/doc/refman/5.7/en/pam-authentication-plugin.html
+		return append([]byte(mc.cfg.Passwd), 0), nil
 
 	default:
 		errLog.Print("unknown auth plugin:", plugin)
@@ -351,51 +341,10 @@ func (mc *mysqlConn) handleAuthResult(oldAuthData []byte, plugin string) error {
 				}
 
 			case cachingSha2PasswordPerformFullAuthentication:
-				if mc.cfg.TLS != nil || mc.cfg.Net == "unix" {
-					// write cleartext auth packet
-					err = mc.writeAuthSwitchPacket(append([]byte(mc.cfg.Passwd), 0))
-					if err != nil {
-						return err
-					}
-				} else {
-					pubKey := mc.cfg.pubKey
-					if pubKey == nil {
-						// request public key from server
-						data, err := mc.buf.takeSmallBuffer(4 + 1)
-						if err != nil {
-							return err
-						}
-						data[4] = cachingSha2PasswordRequestPublicKey
-						err = mc.writePacket(data)
-						if err != nil {
-							return err
-						}
-
-						if data, err = mc.readPacket(); err != nil {
-							return err
-						}
-
-						if data[0] != iAuthMoreData {
-							return fmt.Errorf("unexpect resp from server for caching_sha2_password perform full authentication")
-						}
-
-						// parse public key
-						block, rest := pem.Decode(data[1:])
-						if block == nil {
-							return fmt.Errorf("No Pem data found, data: %s", rest)
-						}
-						pkix, err := x509.ParsePKIXPublicKey(block.Bytes)
-						if err != nil {
-							return err
-						}
-						pubKey = pkix.(*rsa.PublicKey)
-					}
-
-					// send encrypted password
-					err = mc.sendEncryptedPassword(oldAuthData, pubKey)
-					if err != nil {
-						return err
-					}
+				// write cleartext auth packet
+				err = mc.writeAuthSwitchPacket(append([]byte(mc.cfg.Passwd), 0))
+				if err != nil {
+					return err
 				}
 				return mc.readResultOK()
 

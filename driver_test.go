@@ -11,14 +11,12 @@ package mysql
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"io"
 	"io/ioutil"
-	"log"
 	"math"
 	"net"
 	"net/url"
@@ -1345,48 +1343,6 @@ func TestFoundRows(t *testing.T) {
 	})
 }
 
-func TestTLS(t *testing.T) {
-	tlsTestReq := func(dbt *DBTest) {
-		if err := dbt.db.Ping(); err != nil {
-			if err == ErrNoTLS {
-				dbt.Skip("server does not support TLS")
-			} else {
-				dbt.Fatalf("error on Ping: %s", err.Error())
-			}
-		}
-
-		rows := dbt.mustQuery("SHOW STATUS LIKE 'Ssl_cipher'")
-		defer rows.Close()
-
-		var variable, value *sql.RawBytes
-		for rows.Next() {
-			if err := rows.Scan(&variable, &value); err != nil {
-				dbt.Fatal(err.Error())
-			}
-
-			if (*value == nil) || (len(*value) == 0) {
-				dbt.Fatalf("no Cipher")
-			} else {
-				dbt.Logf("Cipher: %s", *value)
-			}
-		}
-	}
-	tlsTestOpt := func(dbt *DBTest) {
-		if err := dbt.db.Ping(); err != nil {
-			dbt.Fatalf("error on Ping: %s", err.Error())
-		}
-	}
-
-	runTests(t, dsn+"&tls=preferred", tlsTestOpt)
-	runTests(t, dsn+"&tls=skip-verify", tlsTestReq)
-
-	// Verify that registering / using a custom cfg works
-	RegisterTLSConfig("custom-skip-verify", &tls.Config{
-		InsecureSkipVerify: true,
-	})
-	runTests(t, dsn+"&tls=custom-skip-verify", tlsTestReq)
-}
-
 func TestReuseClosedConnection(t *testing.T) {
 	// this test does not use sql.database, it uses the driver directly
 	if !available {
@@ -1878,61 +1834,6 @@ func TestConcurrent(t *testing.T) {
 	})
 }
 
-func testDialError(t *testing.T, dialErr error, expectErr error) {
-	RegisterDialContext("mydial", func(ctx context.Context, addr string) (net.Conn, error) {
-		return nil, dialErr
-	})
-
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@mydial(%s)/%s?timeout=30s", user, pass, addr, dbname))
-	if err != nil {
-		t.Fatalf("error connecting: %s", err.Error())
-	}
-	defer db.Close()
-
-	_, err = db.Exec("DO 1")
-	if err != expectErr {
-		t.Fatalf("was expecting %s. Got: %s", dialErr, err)
-	}
-}
-
-func TestDialUnknownError(t *testing.T) {
-	testErr := fmt.Errorf("test")
-	testDialError(t, testErr, testErr)
-}
-
-func TestDialNonRetryableNetErr(t *testing.T) {
-	testErr := netErrorMock{}
-	testDialError(t, testErr, testErr)
-}
-
-func TestDialTemporaryNetErr(t *testing.T) {
-	testErr := netErrorMock{temporary: true}
-	testDialError(t, testErr, testErr)
-}
-
-// Tests custom dial functions
-func TestCustomDial(t *testing.T) {
-	if !available {
-		t.Skipf("MySQL server not running on %s", netAddr)
-	}
-
-	// our custom dial function which justs wraps net.Dial here
-	RegisterDialContext("mydial", func(ctx context.Context, addr string) (net.Conn, error) {
-		var d net.Dialer
-		return d.DialContext(ctx, prot, addr)
-	})
-
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@mydial(%s)/%s?timeout=30s", user, pass, addr, dbname))
-	if err != nil {
-		t.Fatalf("error connecting: %s", err.Error())
-	}
-	defer db.Close()
-
-	if _, err = db.Exec("DO 1"); err != nil {
-		t.Fatalf("connection failed: %s", err.Error())
-	}
-}
-
 func TestSQLInjection(t *testing.T) {
 	createTest := func(arg string) func(dbt *DBTest) {
 		return func(dbt *DBTest) {
@@ -1990,53 +1891,6 @@ func TestInsertRetrieveEscapedData(t *testing.T) {
 	for _, testdsn := range dsns {
 		runTests(t, testdsn, testData)
 	}
-}
-
-func TestUnixSocketAuthFail(t *testing.T) {
-	runTests(t, dsn, func(dbt *DBTest) {
-		// Save the current logger so we can restore it.
-		oldLogger := errLog
-
-		// Set a new logger so we can capture its output.
-		buffer := bytes.NewBuffer(make([]byte, 0, 64))
-		newLogger := log.New(buffer, "prefix: ", 0)
-		SetLogger(newLogger)
-
-		// Restore the logger.
-		defer SetLogger(oldLogger)
-
-		// Make a new DSN that uses the MySQL socket file and a bad password, which
-		// we can make by simply appending any character to the real password.
-		badPass := pass + "x"
-		socket := ""
-		if prot == "unix" {
-			socket = addr
-		} else {
-			// Get socket file from MySQL.
-			err := dbt.db.QueryRow("SELECT @@socket").Scan(&socket)
-			if err != nil {
-				t.Fatalf("error on SELECT @@socket: %s", err.Error())
-			}
-		}
-		t.Logf("socket: %s", socket)
-		badDSN := fmt.Sprintf("%s:%s@unix(%s)/%s?timeout=30s", user, badPass, socket, dbname)
-		db, err := sql.Open("mysql", badDSN)
-		if err != nil {
-			t.Fatalf("error connecting: %s", err.Error())
-		}
-		defer db.Close()
-
-		// Connect to MySQL for real. This will cause an auth failure.
-		err = db.Ping()
-		if err == nil {
-			t.Error("expected Ping() to return an error")
-		}
-
-		// The driver should not log anything.
-		if actual := buffer.String(); actual != "" {
-			t.Errorf("expected no output, got %q", actual)
-		}
-	})
 }
 
 // See Issue #422
@@ -3045,33 +2899,6 @@ var _ driver.DriverContext = &MySQLDriver{}
 
 type dialCtxKey struct{}
 
-func TestConnectorObeysDialTimeouts(t *testing.T) {
-	if !available {
-		t.Skipf("MySQL server not running on %s", netAddr)
-	}
-
-	RegisterDialContext("dialctxtest", func(ctx context.Context, addr string) (net.Conn, error) {
-		var d net.Dialer
-		if !ctx.Value(dialCtxKey{}).(bool) {
-			return nil, fmt.Errorf("test error: query context is not propagated to our dialer")
-		}
-		return d.DialContext(ctx, prot, addr)
-	})
-
-	db, err := sql.Open("mysql", fmt.Sprintf("%s:%s@dialctxtest(%s)/%s?timeout=30s", user, pass, addr, dbname))
-	if err != nil {
-		t.Fatalf("error connecting: %s", err.Error())
-	}
-	defer db.Close()
-
-	ctx := context.WithValue(context.Background(), dialCtxKey{}, true)
-
-	_, err = db.ExecContext(ctx, "DO 1")
-	if err != nil {
-		t.Fatal(err)
-	}
-}
-
 func configForTests(t *testing.T) *Config {
 	if !available {
 		t.Skipf("MySQL server not running on %s", netAddr)
@@ -3081,7 +2908,6 @@ func configForTests(t *testing.T) *Config {
 	mycnf.User = user
 	mycnf.Passwd = pass
 	mycnf.Addr = addr
-	mycnf.Net = prot
 	mycnf.DBName = dbname
 	return mycnf
 }
@@ -3122,41 +2948,6 @@ func (cw *connectorHijack) Connect(ctx context.Context) (driver.Conn, error) {
 	return conn, cw.connErr
 }
 
-func TestConnectorTimeoutsDuringOpen(t *testing.T) {
-	RegisterDialContext("slowconn", func(ctx context.Context, addr string) (net.Conn, error) {
-		var d net.Dialer
-		conn, err := d.DialContext(ctx, prot, addr)
-		if err != nil {
-			return nil, err
-		}
-		return &slowConnection{Conn: conn, slowdown: 100 * time.Millisecond}, nil
-	})
-
-	mycnf := configForTests(t)
-	mycnf.Net = "slowconn"
-
-	conn, err := NewConnector(mycnf)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	hijack := &connectorHijack{Connector: conn}
-
-	db := sql.OpenDB(hijack)
-	defer db.Close()
-
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-
-	_, err = db.ExecContext(ctx, "DO 1")
-	if err != context.DeadlineExceeded {
-		t.Fatalf("ExecContext should have timed out")
-	}
-	if hijack.connErr != context.DeadlineExceeded {
-		t.Fatalf("(*Connector).Connect should have timed out")
-	}
-}
-
 // A connection which can only be closed.
 type dummyConnection struct {
 	net.Conn
@@ -3166,46 +2957,4 @@ type dummyConnection struct {
 func (d *dummyConnection) Close() error {
 	d.closed = true
 	return nil
-}
-
-func TestConnectorTimeoutsWatchCancel(t *testing.T) {
-	var (
-		cancel  func()           // Used to cancel the context just after connecting.
-		created *dummyConnection // The created connection.
-	)
-
-	RegisterDialContext("TestConnectorTimeoutsWatchCancel", func(ctx context.Context, addr string) (net.Conn, error) {
-		// Canceling at this time triggers the watchCancel error branch in Connect().
-		cancel()
-		created = &dummyConnection{}
-		return created, nil
-	})
-
-	mycnf := NewConfig()
-	mycnf.User = "root"
-	mycnf.Addr = "foo"
-	mycnf.Net = "TestConnectorTimeoutsWatchCancel"
-
-	conn, err := NewConnector(mycnf)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	db := sql.OpenDB(conn)
-	defer db.Close()
-
-	var ctx context.Context
-	ctx, cancel = context.WithCancel(context.Background())
-	defer cancel()
-
-	if _, err := db.Conn(ctx); err != context.Canceled {
-		t.Errorf("got %v, want context.Canceled", err)
-	}
-
-	if created == nil {
-		t.Fatal("no connection created")
-	}
-	if !created.closed {
-		t.Errorf("connection not closed")
-	}
 }
