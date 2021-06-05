@@ -10,11 +10,7 @@ package mysql
 
 import (
 	"bytes"
-	"crypto/rsa"
-	"crypto/tls"
 	"errors"
-	"fmt"
-	"math/big"
 	"net"
 	"net/url"
 	"sort"
@@ -36,20 +32,19 @@ var (
 type Config struct {
 	User             string            // Username
 	Passwd           string            // Password (requires User)
-	Net              string            // Network type
-	Addr             string            // Network address (requires Net)
 	DBName           string            // Database name
+	Addr             string            // Address specified in the DSN
+	Net              string            // ignored
 	Params           map[string]string // Connection parameters
 	Collation        string            // Connection collation
 	Loc              *time.Location    // Location for time.Time values
 	MaxAllowedPacket int               // Max packet size allowed
-	ServerPubKey     string            // Server public key name
-	pubKey           *rsa.PublicKey    // Server public key
-	TLSConfig        string            // TLS configuration name
-	tls              *tls.Config       // TLS configuration
 	Timeout          time.Duration     // Dial timeout
 	ReadTimeout      time.Duration     // I/O read timeout
 	WriteTimeout     time.Duration     // I/O write timeout
+
+	// DialFunc  is the external dialer function (required in this branch).
+	DialFunc DialFunc
 
 	AllowAllFiles           bool // Allow all files to be used with LOAD DATA LOCAL INFILE
 	AllowCleartextPasswords bool // Allows the cleartext client side plugin
@@ -77,19 +72,10 @@ func NewConfig() *Config {
 
 func (cfg *Config) Clone() *Config {
 	cp := *cfg
-	if cp.tls != nil {
-		cp.tls = cfg.tls.Clone()
-	}
 	if len(cp.Params) > 0 {
 		cp.Params = make(map[string]string, len(cfg.Params))
 		for k, v := range cfg.Params {
 			cp.Params[k] = v
-		}
-	}
-	if cfg.pubKey != nil {
-		cp.pubKey = &rsa.PublicKey{
-			N: new(big.Int).Set(cfg.pubKey.N),
-			E: cfg.pubKey.E,
 		}
 	}
 	return &cp
@@ -117,34 +103,6 @@ func (cfg *Config) normalize() error {
 		}
 	} else if cfg.Net == "tcp" {
 		cfg.Addr = ensureHavePort(cfg.Addr)
-	}
-
-	switch cfg.TLSConfig {
-	case "false", "":
-		// don't set anything
-	case "true":
-		cfg.tls = &tls.Config{}
-	case "skip-verify", "preferred":
-		cfg.tls = &tls.Config{InsecureSkipVerify: true}
-	default:
-		cfg.tls = getTLSConfigClone(cfg.TLSConfig)
-		if cfg.tls == nil {
-			return errors.New("invalid value / unknown config name: " + cfg.TLSConfig)
-		}
-	}
-
-	if cfg.tls != nil && cfg.tls.ServerName == "" && !cfg.tls.InsecureSkipVerify {
-		host, _, err := net.SplitHostPort(cfg.Addr)
-		if err == nil {
-			cfg.tls.ServerName = host
-		}
-	}
-
-	if cfg.ServerPubKey != "" {
-		cfg.pubKey = getServerPubKey(cfg.ServerPubKey)
-		if cfg.pubKey == nil {
-			return errors.New("invalid value / unknown server pub key name: " + cfg.ServerPubKey)
-		}
 	}
 
 	return nil
@@ -252,16 +210,8 @@ func (cfg *Config) FormatDSN() string {
 		writeDSNParam(&buf, &hasParam, "rejectReadOnly", "true")
 	}
 
-	if len(cfg.ServerPubKey) > 0 {
-		writeDSNParam(&buf, &hasParam, "serverPubKey", url.QueryEscape(cfg.ServerPubKey))
-	}
-
 	if cfg.Timeout > 0 {
 		writeDSNParam(&buf, &hasParam, "timeout", cfg.Timeout.String())
-	}
-
-	if len(cfg.TLSConfig) > 0 {
-		writeDSNParam(&buf, &hasParam, "tls", url.QueryEscape(cfg.TLSConfig))
 	}
 
 	if cfg.WriteTimeout > 0 {
@@ -488,14 +438,6 @@ func parseDSNParams(cfg *Config, params string) (err error) {
 				return errors.New("invalid bool value: " + value)
 			}
 
-		// Server public key
-		case "serverPubKey":
-			name, err := url.QueryUnescape(value)
-			if err != nil {
-				return fmt.Errorf("invalid value for server pub key name: %v", err)
-			}
-			cfg.ServerPubKey = name
-
 		// Strict mode
 		case "strict":
 			panic("strict mode has been removed. See https://github.com/go-sql-driver/mysql/wiki/strict-mode")
@@ -505,25 +447,6 @@ func parseDSNParams(cfg *Config, params string) (err error) {
 			cfg.Timeout, err = time.ParseDuration(value)
 			if err != nil {
 				return
-			}
-
-		// TLS-Encryption
-		case "tls":
-			boolValue, isBool := readBool(value)
-			if isBool {
-				if boolValue {
-					cfg.TLSConfig = "true"
-				} else {
-					cfg.TLSConfig = "false"
-				}
-			} else if vl := strings.ToLower(value); vl == "skip-verify" || vl == "preferred" {
-				cfg.TLSConfig = vl
-			} else {
-				name, err := url.QueryUnescape(value)
-				if err != nil {
-					return fmt.Errorf("invalid value for TLS config name: %v", err)
-				}
-				cfg.TLSConfig = name
 			}
 
 		// I/O write Timeout
