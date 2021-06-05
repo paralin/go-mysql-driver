@@ -15,7 +15,6 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/pem"
-	"fmt"
 	"sync"
 )
 
@@ -274,20 +273,10 @@ func (mc *mysqlConn) auth(authData []byte, plugin string) ([]byte, error) {
 		if len(mc.cfg.Passwd) == 0 {
 			return []byte{0}, nil
 		}
-		if mc.cfg.tls != nil || mc.cfg.Net == "unix" {
-			// write cleartext auth packet
-			return append([]byte(mc.cfg.Passwd), 0), nil
-		}
-
-		pubKey := mc.cfg.pubKey
-		if pubKey == nil {
-			// request public key from server
-			return []byte{1}, nil
-		}
-
-		// encrypted password
-		enc, err := encryptPassword(mc.cfg.Passwd, authData, pubKey)
-		return enc, err
+		// write cleartext auth packet
+		return append([]byte(mc.cfg.Passwd), 0), nil
+		// request public key from server
+		// return []byte{1}, nil
 
 	default:
 		errLog.Print("unknown auth plugin:", plugin)
@@ -350,44 +339,10 @@ func (mc *mysqlConn) handleAuthResult(oldAuthData []byte, plugin string) error {
 				}
 
 			case cachingSha2PasswordPerformFullAuthentication:
-				if mc.cfg.tls != nil || mc.cfg.Net == "unix" {
-					// write cleartext auth packet
-					err = mc.writeAuthSwitchPacket(append([]byte(mc.cfg.Passwd), 0))
-					if err != nil {
-						return err
-					}
-				} else {
-					pubKey := mc.cfg.pubKey
-					if pubKey == nil {
-						// request public key from server
-						data, err := mc.buf.takeSmallBuffer(4 + 1)
-						if err != nil {
-							return err
-						}
-						data[4] = cachingSha2PasswordRequestPublicKey
-						mc.writePacket(data)
-
-						// parse public key
-						if data, err = mc.readPacket(); err != nil {
-							return err
-						}
-
-						block, rest := pem.Decode(data[1:])
-						if block == nil {
-							return fmt.Errorf("No Pem data found, data: %s", rest)
-						}
-						pkix, err := x509.ParsePKIXPublicKey(block.Bytes)
-						if err != nil {
-							return err
-						}
-						pubKey = pkix.(*rsa.PublicKey)
-					}
-
-					// send encrypted password
-					err = mc.sendEncryptedPassword(oldAuthData, pubKey)
-					if err != nil {
-						return err
-					}
+				// write cleartext auth packet
+				err = mc.writeAuthSwitchPacket(append([]byte(mc.cfg.Passwd), 0))
+				if err != nil {
+					return err
 				}
 				return mc.readResultOK()
 
