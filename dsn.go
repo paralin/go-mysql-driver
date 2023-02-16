@@ -114,7 +114,7 @@ func (cfg *Config) normalize() error {
 		case "unix":
 			cfg.Addr = "/tmp/mysql.sock"
 		default:
-			return errors.New("default addr for network '" + cfg.Net + "' unknown")
+			// return errors.New("default addr for network '" + cfg.Net + "' unknown")
 		}
 	} else if cfg.Net == "tcp" {
 		cfg.Addr = ensureHavePort(cfg.Addr)
